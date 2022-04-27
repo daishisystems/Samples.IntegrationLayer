@@ -17,5 +17,10 @@ namespace Samples.IntegrationLayer.Models
     public class MemberDBContext : DbContext
     {
         public DbSet<Member> Members { get; set; }
+
+        protected override void OnModelCreating(DbModelBuilder modelBuilder)
+        {
+            modelBuilder.HasDefaultSchema("careplan");
+        }
     }
 }
