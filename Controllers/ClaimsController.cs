@@ -2,14 +2,32 @@
 using System.Data.Entity;
 using System.Linq;
 using System.Net;
+using System.Threading.Tasks;
 using System.Web.Mvc;
+using Azure.Messaging.ServiceBus;
+using Newtonsoft.Json;
 using Samples.IntegrationLayer.Models;
 
 namespace Samples.IntegrationLayer.Controllers
 {
     public class ClaimsController : Controller
     {
-        private readonly ClaimDBContext db = new ClaimDBContext();
+        // number of messages to be sent to the queue
+        private const int numOfMessages = 3;
+
+        // connection string to your Service Bus namespace
+        private static readonly string connectionString =
+            "Endpoint=sb://gmst-message-backbone.servicebus.windows.net/;SharedAccessKeyName=RootManageSharedAccessKey;SharedAccessKey=GChRDAE1QIgdQmBMAZw2dHkJgk+Mg7AhDK363dxBhj4=";
+
+        // name of your Service Bus queue
+        private static readonly string queueName = "Default";
+
+        // the client that owns the connection and can be used to create senders and receivers
+        private static ServiceBusClient client;
+
+        // the sender used to publish messages to the queue
+        private static ServiceBusSender sender;
+        private readonly ClaimDBContext db = new();
 
         // GET: Claims
         public ActionResult Index()
@@ -37,13 +55,44 @@ namespace Samples.IntegrationLayer.Controllers
         // more details see https://go.microsoft.com/fwlink/?LinkId=317598.
         [HttpPost]
         [ValidateAntiForgeryToken]
-        public ActionResult Create([Bind(Include = "ClaimId,MemberId,IssuedDate,Description")] Claim claim)
+        public async Task<ActionResult> Create([Bind(Include = "ClaimId,MemberId,IssuedDate,Description")] Claim claim)
         {
             if (ModelState.IsValid)
             {
                 claim.ClaimId = Guid.NewGuid();
                 db.Claims.Add(claim);
-                db.SaveChanges();
+                await db.SaveChangesAsync();
+
+                // The Service Bus client types are safe to cache and use as a singleton for the lifetime
+                // of the application, which is best practice when messages are being published or read
+                // regularly.
+                //
+                // Create the clients that we'll use for sending and processing messages.
+                client = new ServiceBusClient(connectionString);
+                sender = client.CreateSender(queueName);
+
+                // create a batch 
+                using var messageBatch = await sender.CreateMessageBatchAsync();
+                // try adding a message to the batch
+                var messagePayload = JsonConvert.SerializeObject(claim);
+                    if (!messageBatch.TryAddMessage(new ServiceBusMessage(messagePayload)))
+                        // if it is too large for the batch
+                        throw new Exception($"The message is too large to fit in the batch.");
+
+                try
+                {
+                    // Use the producer client to send the batch of messages to the Service Bus queue
+                    await sender.SendMessagesAsync(messageBatch);
+                    Console.WriteLine($"A batch of {numOfMessages} messages has been published to the queue.");
+                }
+                finally
+                {
+                    // Calling DisposeAsync on client types is required to ensure that network
+                    // resources and other unmanaged objects are properly cleaned up.
+                    await sender.DisposeAsync();
+                    await client.DisposeAsync();
+                }
+
                 return RedirectToAction("Index");
             }
 
